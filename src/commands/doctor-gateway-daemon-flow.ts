@@ -1,17 +1,14 @@
-import path from "node:path";
-
 import type { ClawdbotConfig } from "../config/config.js";
 import { resolveGatewayPort } from "../config/config.js";
-import { resolveGatewayLaunchAgentLabel } from "../daemon/constants.js";
+import { resolveGatewayLaunchAgentLabel, resolveNodeLaunchAgentLabel } from "../daemon/constants.js";
 import { readLastGatewayErrorLine } from "../daemon/diagnostics.js";
-import { resolveGatewayProgramArguments } from "../daemon/program-args.js";
 import {
-  renderSystemNodeWarning,
-  resolvePreferredNodePath,
-  resolveSystemNodeInfo,
-} from "../daemon/runtime-paths.js";
+  isLaunchAgentListed,
+  isLaunchAgentLoaded,
+  launchAgentPlistExists,
+  repairLaunchAgentBootstrap,
+} from "../daemon/launchd.js";
 import { resolveGatewayService } from "../daemon/service.js";
-import { buildServiceEnvironment } from "../daemon/service-env.js";
 import { isSystemdUserServiceAvailable } from "../daemon/systemd.js";
 import { renderSystemdUnavailableHints } from "../daemon/systemd-hints.js";
 import { formatPortDiagnostics, inspectPortUsage } from "../infra/ports.js";
@@ -24,10 +21,58 @@ import {
   GATEWAY_DAEMON_RUNTIME_OPTIONS,
   type GatewayDaemonRuntime,
 } from "./daemon-runtime.js";
+import { buildGatewayInstallPlan, gatewayInstallErrorHint } from "./daemon-install-helpers.js";
 import { buildGatewayRuntimeHints, formatGatewayRuntimeSummary } from "./doctor-format.js";
 import type { DoctorOptions, DoctorPrompter } from "./doctor-prompter.js";
 import { healthCommand } from "./health.js";
 import { formatHealthCheckFailure } from "./health-format.js";
+
+async function maybeRepairLaunchAgentBootstrap(params: {
+  env: Record<string, string | undefined>;
+  title: string;
+  runtime: RuntimeEnv;
+  prompter: DoctorPrompter;
+}): Promise<boolean> {
+  if (process.platform !== "darwin") return false;
+
+  const listed = await isLaunchAgentListed({ env: params.env });
+  if (!listed) return false;
+
+  const loaded = await isLaunchAgentLoaded({ env: params.env });
+  if (loaded) return false;
+
+  const plistExists = await launchAgentPlistExists(params.env);
+  if (!plistExists) return false;
+
+  note(
+    "LaunchAgent is listed but not loaded in launchd.",
+    `${params.title} LaunchAgent`,
+  );
+
+  const shouldFix = await params.prompter.confirmSkipInNonInteractive({
+    message: `Repair ${params.title} LaunchAgent bootstrap now?`,
+    initialValue: true,
+  });
+  if (!shouldFix) return false;
+
+  params.runtime.log(`Bootstrapping ${params.title} LaunchAgent...`);
+  const repair = await repairLaunchAgentBootstrap({ env: params.env });
+  if (!repair.ok) {
+    params.runtime.error(
+      `${params.title} LaunchAgent bootstrap failed: ${repair.detail ?? "unknown error"}`,
+    );
+    return false;
+  }
+
+  const verified = await isLaunchAgentLoaded({ env: params.env });
+  if (!verified) {
+    params.runtime.error(`${params.title} LaunchAgent still not loaded after repair.`);
+    return false;
+  }
+
+  note(`${params.title} LaunchAgent repaired.`, `${params.title} LaunchAgent`);
+  return true;
+}
 
 export async function maybeRepairGatewayDaemon(params: {
   cfg: ClawdbotConfig;
@@ -40,10 +85,31 @@ export async function maybeRepairGatewayDaemon(params: {
   if (params.healthOk) return;
 
   const service = resolveGatewayService();
-  const loaded = await service.isLoaded({ env: process.env });
+  let loaded = await service.isLoaded({ env: process.env });
   let serviceRuntime: Awaited<ReturnType<typeof service.readRuntime>> | undefined;
   if (loaded) {
     serviceRuntime = await service.readRuntime(process.env).catch(() => undefined);
+  }
+
+  if (process.platform === "darwin" && params.cfg.gateway?.mode !== "remote") {
+    const gatewayRepaired = await maybeRepairLaunchAgentBootstrap({
+      env: process.env,
+      title: "Gateway",
+      runtime: params.runtime,
+      prompter: params.prompter,
+    });
+    await maybeRepairLaunchAgentBootstrap({
+      env: { ...process.env, CLAWDBOT_LAUNCHD_LABEL: resolveNodeLaunchAgentLabel() },
+      title: "Node",
+      runtime: params.runtime,
+      prompter: params.prompter,
+    });
+    if (gatewayRepaired) {
+      loaded = await service.isLoaded({ env: process.env });
+      if (loaded) {
+        serviceRuntime = await service.readRuntime(process.env).catch(() => undefined);
+      }
+    }
   }
 
   if (params.cfg.gateway?.mode !== "remote") {
@@ -81,41 +147,26 @@ export async function maybeRepairGatewayDaemon(params: {
           },
           DEFAULT_GATEWAY_DAEMON_RUNTIME,
         );
-        const devMode =
-          process.argv[1]?.includes(`${path.sep}src${path.sep}`) &&
-          process.argv[1]?.endsWith(".ts");
         const port = resolveGatewayPort(params.cfg, process.env);
-        const nodePath = await resolvePreferredNodePath({
-          env: process.env,
-          runtime: daemonRuntime,
-        });
-        const { programArguments, workingDirectory } = await resolveGatewayProgramArguments({
-          port,
-          dev: devMode,
-          runtime: daemonRuntime,
-          nodePath,
-        });
-        if (daemonRuntime === "node") {
-          const systemNode = await resolveSystemNodeInfo({ env: process.env });
-          const warning = renderSystemNodeWarning(systemNode, programArguments[0]);
-          if (warning) note(warning, "Gateway runtime");
-        }
-        const environment = buildServiceEnvironment({
+        const { programArguments, workingDirectory, environment } = await buildGatewayInstallPlan({
           env: process.env,
           port,
           token: params.cfg.gateway?.auth?.token ?? process.env.CLAWDBOT_GATEWAY_TOKEN,
-          launchdLabel:
-            process.platform === "darwin"
-              ? resolveGatewayLaunchAgentLabel(process.env.CLAWDBOT_PROFILE)
-              : undefined,
+          runtime: daemonRuntime,
+          warn: (message, title) => note(message, title),
         });
-        await service.install({
-          env: process.env,
-          stdout: process.stdout,
-          programArguments,
-          workingDirectory,
-          environment,
-        });
+        try {
+          await service.install({
+            env: process.env,
+            stdout: process.stdout,
+            programArguments,
+            workingDirectory,
+            environment,
+          });
+        } catch (err) {
+          note(`Gateway daemon install failed: ${String(err)}`, "Gateway");
+          note(gatewayInstallErrorHint(), "Gateway");
+        }
       }
     }
     return;

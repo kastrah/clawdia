@@ -7,9 +7,15 @@ import type { RuntimeEnv } from "../runtime.js";
 import { runSecurityAudit } from "../security/audit.js";
 import { renderTable } from "../terminal/table.js";
 import { theme } from "../terminal/theme.js";
+import {
+  resolveMemoryCacheSummary,
+  resolveMemoryFtsState,
+  resolveMemoryVectorState,
+  type Tone,
+} from "../memory/status-format.js";
 import { formatHealthChannelLines, type HealthSummary } from "./health.js";
 import { resolveControlUiLinks } from "./onboard-helpers.js";
-import { getDaemonStatusSummary } from "./status.daemon.js";
+import { getDaemonStatusSummary, getNodeDaemonStatusSummary } from "./status.daemon.js";
 import {
   formatAge,
   formatDuration,
@@ -64,6 +70,8 @@ export async function statusCommand(
     agentStatus,
     channels,
     summary,
+    memory,
+    memoryPlugin,
   } = scan;
 
   const securityAudit = await withProgress(
@@ -108,12 +116,18 @@ export async function statusCommand(
     : undefined;
 
   if (opts.json) {
+    const [daemon, nodeDaemon] = await Promise.all([
+      getDaemonStatusSummary(),
+      getNodeDaemonStatusSummary(),
+    ]);
     runtime.log(
       JSON.stringify(
         {
           ...summary,
           os: osSummary,
           update,
+          memory,
+          memoryPlugin,
           gateway: {
             mode: gatewayMode,
             url: gatewayConnection.url,
@@ -124,6 +138,8 @@ export async function statusCommand(
             self: gatewaySelf,
             error: gatewayProbe?.error ?? null,
           },
+          gatewayService: daemon,
+          nodeService: nodeDaemon,
           agents: agentStatus,
           securityAudit,
           ...(health || usage ? { health, usage } : {}),
@@ -200,11 +216,19 @@ export async function statusCommand(
     return `${agentStatus.agents.length} · ${pending} · sessions ${agentStatus.totalSessions}${defSuffix}`;
   })();
 
-  const daemon = await getDaemonStatusSummary();
+  const [daemon, nodeDaemon] = await Promise.all([
+    getDaemonStatusSummary(),
+    getNodeDaemonStatusSummary(),
+  ]);
   const daemonValue = (() => {
     if (daemon.installed === false) return `${daemon.label} not installed`;
     const installedPrefix = daemon.installed === true ? "installed · " : "";
     return `${daemon.label} ${installedPrefix}${daemon.loadedText}${daemon.runtimeShort ? ` · ${daemon.runtimeShort}` : ""}`;
+  })();
+  const nodeDaemonValue = (() => {
+    if (nodeDaemon.installed === false) return `${nodeDaemon.label} not installed`;
+    const installedPrefix = nodeDaemon.installed === true ? "installed · " : "";
+    return `${nodeDaemon.label} ${installedPrefix}${nodeDaemon.loadedText}${nodeDaemon.runtimeShort ? ` · ${nodeDaemon.runtimeShort}` : ""}`;
   })();
 
   const defaults = summary.sessions.defaults;
@@ -232,6 +256,42 @@ export async function statusCommand(
       ? `${summary.sessions.paths.length} stores`
       : (summary.sessions.paths[0] ?? "unknown");
 
+  const memoryValue = (() => {
+    if (!memoryPlugin.enabled) {
+      const suffix = memoryPlugin.reason ? ` (${memoryPlugin.reason})` : "";
+      return muted(`disabled${suffix}`);
+    }
+    if (!memory) {
+      const slot = memoryPlugin.slot ? `plugin ${memoryPlugin.slot}` : "plugin";
+      return muted(`enabled (${slot}) · unavailable`);
+    }
+    const parts: string[] = [];
+    const dirtySuffix = memory.dirty ? ` · ${warn("dirty")}` : "";
+    parts.push(`${memory.files} files · ${memory.chunks} chunks${dirtySuffix}`);
+    if (memory.sources?.length) parts.push(`sources ${memory.sources.join(", ")}`);
+    if (memoryPlugin.slot) parts.push(`plugin ${memoryPlugin.slot}`);
+    const colorByTone = (tone: Tone, text: string) =>
+      tone === "ok" ? ok(text) : tone === "warn" ? warn(text) : muted(text);
+    const vector = memory.vector;
+    if (vector) {
+      const state = resolveMemoryVectorState(vector);
+      const label = state.state === "disabled" ? "vector off" : `vector ${state.state}`;
+      parts.push(colorByTone(state.tone, label));
+    }
+    const fts = memory.fts;
+    if (fts) {
+      const state = resolveMemoryFtsState(fts);
+      const label = state.state === "disabled" ? "fts off" : `fts ${state.state}`;
+      parts.push(colorByTone(state.tone, label));
+    }
+    const cache = memory.cache;
+    if (cache) {
+      const summary = resolveMemoryCacheSummary(cache);
+      parts.push(colorByTone(summary.tone, summary.text));
+    }
+    return parts.join(" · ");
+  })();
+
   const updateAvailability = resolveUpdateAvailability(update);
   const updateLine = formatUpdateOneLiner(update).replace(/^Update:\s*/i, "");
 
@@ -252,8 +312,10 @@ export async function statusCommand(
       Value: updateAvailability.available ? warn(`available · ${updateLine}`) : updateLine,
     },
     { Item: "Gateway", Value: gatewayValue },
-    { Item: "Daemon", Value: daemonValue },
+    { Item: "Gateway service", Value: daemonValue },
+    { Item: "Node service", Value: nodeDaemonValue },
     { Item: "Agents", Value: agentsValue },
+    { Item: "Memory", Value: memoryValue },
     { Item: "Probes", Value: probesValue },
     { Item: "Events", Value: eventsValue },
     { Item: "Heartbeat", Value: heartbeatValue },

@@ -13,13 +13,15 @@ export type AuthChoiceGroupId =
   | "openai"
   | "anthropic"
   | "google"
+  | "copilot"
   | "openrouter"
   | "ai-gateway"
   | "moonshot"
   | "zai"
   | "opencode-zen"
   | "minimax"
-  | "synthetic";
+  | "synthetic"
+  | "qwen";
 
 export type AuthChoiceGroup = {
   value: AuthChoiceGroupId;
@@ -53,6 +55,12 @@ const AUTH_CHOICE_GROUP_DEFS: {
     choices: ["minimax-api", "minimax-api-lightning"],
   },
   {
+    value: "qwen",
+    label: "Qwen",
+    hint: "OAuth",
+    choices: ["qwen-portal"],
+  },
+  {
     value: "synthetic",
     label: "Synthetic",
     hint: "Anthropic-compatible (multi-model)",
@@ -61,8 +69,14 @@ const AUTH_CHOICE_GROUP_DEFS: {
   {
     value: "google",
     label: "Google",
-    hint: "Gemini API key",
-    choices: ["gemini-api-key"],
+    hint: "Gemini API key + OAuth",
+    choices: ["gemini-api-key", "google-antigravity", "google-gemini-cli"],
+  },
+  {
+    value: "copilot",
+    label: "Copilot",
+    hint: "GitHub + local proxy",
+    choices: ["github-copilot", "copilot-proxy"],
   },
   {
     value: "openrouter",
@@ -188,7 +202,23 @@ export function buildAuthChoiceOptions(params: {
     hint: "Uses GitHub device flow",
   });
   options.push({ value: "gemini-api-key", label: "Google Gemini API key" });
+  options.push({
+    value: "google-antigravity",
+    label: "Google Antigravity OAuth",
+    hint: "Uses the bundled Antigravity auth plugin",
+  });
+  options.push({
+    value: "google-gemini-cli",
+    label: "Google Gemini CLI OAuth",
+    hint: "Uses the bundled Gemini CLI auth plugin",
+  });
   options.push({ value: "zai-api-key", label: "Z.AI (GLM 4.7) API key" });
+  options.push({ value: "qwen-portal", label: "Qwen OAuth" });
+  options.push({
+    value: "copilot-proxy",
+    label: "Copilot Proxy (local)",
+    hint: "Local proxy for VS Code Copilot models",
+  });
   options.push({ value: "apiKey", label: "Anthropic API key" });
   // Token flow is currently Anthropic-only; use CLI for advanced providers.
   options.push({
