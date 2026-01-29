@@ -2,7 +2,6 @@ import type { Command } from "commander";
 
 import { agentsListCommand } from "../../commands/agents.js";
 import { healthCommand } from "../../commands/health.js";
-import { sessionsCommand } from "../../commands/sessions.js";
 import { statusCommand } from "../../commands/status.js";
 import { defaultRuntime } from "../../runtime.js";
 import { getFlagValue, getPositiveIntFlagValue, getVerboseFlag, hasFlag } from "../argv.js";
@@ -62,19 +61,6 @@ const routeStatus: RouteSpec = {
     const timeoutMs = getPositiveIntFlagValue(argv, "--timeout");
     if (timeoutMs === null) return false;
     await statusCommand({ json, deep, all, usage, timeoutMs, verbose }, defaultRuntime);
-    return true;
-  },
-};
-
-const routeSessions: RouteSpec = {
-  match: (path) => path[0] === "sessions",
-  run: async (argv) => {
-    const json = hasFlag(argv, "--json");
-    const store = getFlagValue(argv, "--store");
-    if (store === null) return false;
-    const active = getFlagValue(argv, "--active");
-    if (active === null) return false;
-    await sessionsCommand({ json, store, active }, defaultRuntime);
     return true;
   },
 };
@@ -146,7 +132,7 @@ export const commandRegistry: CommandRegistration[] = [
   {
     id: "status-health-sessions",
     register: ({ program }) => registerStatusHealthSessionsCommands(program),
-    routes: [routeHealth, routeStatus, routeSessions],
+    routes: [routeHealth, routeStatus],
   },
   {
     id: "browser",
