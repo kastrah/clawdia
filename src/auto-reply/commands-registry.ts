@@ -93,6 +93,7 @@ export function isCommandEnabled(cfg: MoltbotConfig, commandKey: string): boolea
   if (commandKey === "config") return cfg.commands?.config === true;
   if (commandKey === "debug") return cfg.commands?.debug === true;
   if (commandKey === "bash") return cfg.commands?.bash === true;
+  if (commandKey === "restart") return cfg.commands?.restart === true;
   return true;
 }
 
