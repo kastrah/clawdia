@@ -1,9 +1,11 @@
 import { abortEmbeddedPiRun } from "../../agents/pi-embedded.js";
+import { callGatewayTool } from "../../agents/tools/gateway.js";
 import type { SessionEntry } from "../../config/sessions.js";
 import { updateSessionStore } from "../../config/sessions.js";
 import { logVerbose } from "../../globals.js";
 import { createInternalHookEvent, triggerInternalHook } from "../../hooks/internal-hooks.js";
 import { scheduleGatewaySigusr1Restart, triggerMoltbotRestart } from "../../infra/restart.js";
+import { writeRestartSentinel } from "../../infra/restart-sentinel.js";
 import { parseActivationCommand } from "../group-activation.js";
 import { parseSendPolicyCommand } from "../send-policy.js";
 import { normalizeUsageDisplay, resolveResponseUsageMode } from "../thinking.js";
@@ -231,6 +233,63 @@ export const handleRestartCommand: CommandHandler = async (params, allowTextComm
       },
     };
   }
+
+  // Check if gateway is in remote mode - send RPC call to remote gateway
+  const isRemoteMode = params.cfg.gateway?.mode === "remote";
+  if (isRemoteMode) {
+    const remoteUrl = params.cfg.gateway?.remote?.url;
+    if (!remoteUrl) {
+      return {
+        shouldContinue: false,
+        reply: {
+          text: "⚠️ Remote gateway URL not configured. Check gateway.remote.url in config.",
+        },
+      };
+    }
+    try {
+      // Use config.patch with empty patch to trigger restart on remote gateway
+      await callGatewayTool(
+        "config.patch",
+        {},
+        {
+          raw: "{}",
+          sessionKey: params.sessionKey,
+          note: "/restart command",
+          restartDelayMs: 1000,
+        },
+      );
+      return {
+        shouldContinue: false,
+        reply: {
+          text: "⚙️ Restarting remote clawdbot gateway; back in a few seconds.",
+        },
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return {
+        shouldContinue: false,
+        reply: {
+          text: `⚠️ Remote restart failed: ${message}`,
+        },
+      };
+    }
+  }
+
+  // Local mode: use SIGUSR1 or launchctl
+  // Write restart sentinel so the user gets a notification after restart
+  const deliveryContext = {
+    channel: params.command.channel,
+    to: params.command.to,
+  };
+  await writeRestartSentinel({
+    kind: "restart",
+    status: "ok",
+    ts: Date.now(),
+    sessionKey: params.sessionKey,
+    deliveryContext,
+    message: "✅ Moltbot restarted successfully.",
+  }).catch(() => {});
+
   const hasSigusr1Listener = process.listenerCount("SIGUSR1") > 0;
   if (hasSigusr1Listener) {
     scheduleGatewaySigusr1Restart({ reason: "/restart" });
