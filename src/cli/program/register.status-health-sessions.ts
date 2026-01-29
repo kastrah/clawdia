@@ -108,7 +108,7 @@ export function registerStatusHealthSessionsCommands(program: Command) {
       });
     });
 
-  program
+  const sessionsCmd = program
     .command("sessions")
     .description("List stored conversation sessions")
     .option("--json", "Output as JSON", false)
@@ -144,8 +144,8 @@ export function registerStatusHealthSessionsCommands(program: Command) {
       );
     });
 
-  program
-    .command("sessions health")
+  sessionsCmd
+    .command("health")
     .description("Check session health for tool call/result pairing issues")
     .option("--verbose", "Show diagnostics for all sessions", false)
     .option("--session-id <id>", "Check a specific session by ID")
